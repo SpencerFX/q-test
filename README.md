@@ -45,10 +45,18 @@ each do best and combines it in one small, dependency-free engine:
   unlike q-desc's `testFramework` (which this borrows the core idea from):
   arity is read directly off the loaded function, and every generated case
   is clearly marked as a starting point to refine, not a finished test.
+- **Fill a schema file's tables with plausible fixture data**, `q
+  bin/qtest.q datagen schema.q` generates N rows per table a schema file
+  defines, inferring a generator per column from its q type and its name
+  (a `price`/`bid`/`ask` column gets different values than a `size`/`qty`
+  one; `sym` draws from a small instrument-style pool, not garbage
+  symbols) — built on the same `.qt.gen.*` primitives as property-based
+  testing, so any column's default is one override away from whatever a
+  real test actually needs.
 
 None of this is trying to out-feature resq, which is already a large,
-comprehensive superset of qspec — the goal here was a small (~800 lines
-across 8 files), self-contained engine that keeps the two things worth
+comprehensive superset of qspec — the goal here was a small (~1100 lines
+across 10 files), self-contained engine that keeps the two things worth
 keeping from every framework surveyed and drops the rest.
 
 ## Layout
@@ -62,8 +70,10 @@ lib/runner.q     shared execution primitive + convention-style orchestration
 lib/dsl.q        describe/should BDD DSL, built on the same primitive
 lib/report.q     console summary + JUnit XML
 lib/scaffold.q   generates a *_test.q from a plain source file
+lib/datagen.q    .qt.datagen.forTable / .qt.datagen.forSchema
 bin/qtest.q      CLI: q bin/qtest.q <path> [-junit <file>] [-strict]
-                      q bin/qtest.q generate <srcFile.q> [-outDir <dir>]
+                      q bin/qtest.q generate <srcFile.q> [-outDir <dir>] [-schema <schemaFile.q>]
+                      q bin/qtest.q datagen <schemaFile.q> [-rows N] [-save <dir>]
 examples/        a worked example of each style
 tests/           q-test's own test suite, written using q-test itself
 ```
@@ -188,12 +198,113 @@ For every function `lib/scaffold.q` finds in the source file, it writes one
 per argument, arity read directly off the loaded function, no annotation
 step required. The result is a normal, editable `*_test.q`: narrow the
 generators to each argument's real domain, or replace a case outright, the
-same as any hand-written test. It found the function's own namespace by
-scanning for the file's `\d .foo` line; a file with no such line is scanned
-by diffing root's globals before/after loading instead. `-outDir <dir>`
-changes where the file is written (default `tests`); functions of arity
-over 8, or anything that isn't a plain lambda (a projection, a composed
-function), are skipped and listed in the summary rather than guessed at.
+same as any hand-written test. `-outDir <dir>` changes where the file is
+written (default `tests`); functions of arity over 8, or anything that
+isn't a plain lambda (a projection, a composed function), are skipped and
+listed in the summary rather than guessed at.
+
+It finds a namespace declared either the `\d .foo` way or via fully-
+qualified assignment (`.foo.bar:{...}`, no `\d` at all — the more common
+convention in larger codebases), taking whichever namespace prefix most of
+the file's own top-level assignments actually share, not just the first
+line's (a file's first such line is sometimes an outlier one level deeper
+than everything else, e.g. a single nested state flag). A file with
+neither — only bare top-level names — falls back to diffing root's
+globals before/after loading.
+
+Generic int input isn't a safe default for every function: fuzzing one
+that shells out or touches the filesystem (a `system[...]` call, a file
+write) will actually invoke that side effect on garbage arguments, even if
+it then harmlessly fails against a path that doesn't exist. Skim what a
+function does before trusting a generated case for it unattended, same as
+you would for any fuzz target in another language.
+
+### Table-shaped arguments, given a schema
+
+Plenty of real functions don't take scalars at all — they take a table.
+Pass `-schema <schemaFile.q>` (the same table-shapes-only file
+`.qt.datagen.forSchema` consumes) and a parameter's own *name*, not just
+its position, picks a more sensible generator than a bare int:
+
+```
+q bin/qtest.q generate analytics/spread.q -schema core/schema.q
+```
+
+```q
+testCompose:{.qt.gen.forAll[(.qt.gen.table[value `quote;1;5]);{[p1] .qt.assertNoErrorArgs[.spread.compose;enlist p1;"survives generated input"];1b};...
+testWavgBy:{.qt.gen.forAll[(.qt.gen.table[value `quote;1;5];.qt.gen.oneOf[(`$();enlist `sym)]);...
+testByTime:{.qt.gen.forAll[(.qt.gen.table[value `quote;1;5];.qt.gen.oneOf[`hour`minute`second`date];.qt.gen.oneOf[(`$();enlist `sym)]);...
+```
+
+A parameter named like `tab`/`table` draws a fresh random table from the
+schema's own column types each trial (`.qt.gen.table`, the same generator
+`.qt.datagen.forTable` is built on); `*cols*` draws a real column-name
+list (or none); `bucket` draws a calendar/xbar unit; `percentiles` draws a
+fraction list; a lone `*col*` draws one of the table's real column names.
+Everything else still falls back to a plain int. Only the schema's first
+table is used, for every table-shaped parameter of every function — q
+carries no argument-type information to match a specific parameter to a
+specific table by, and for a single-table-shape domain that one table is
+the right guess for all of them anyway.
+
+The generated table reference is always `value `tableName`, never the
+bare table name: the generated `forAll` calls live inside a function
+defined under `\d .xxxTest`, and an unqualified name there resolves only
+relative to `.xxxTest` — with no fallback search up to root — even though
+the call site itself is fully qualified. `value` bypasses that and reaches
+the real global directly.
+
+This still isn't a substitute for hand-written tests against a schema that
+actually matches the function's *own* expectations — a schema table with
+the wrong columns for what a function needs produces confidently wrong
+data, not a mysterious int. Skim the generated file the same way you would
+without `-schema`.
+
+## Generating fixture data from a schema file
+
+```
+q bin/qtest.q datagen examples/schema.q -rows 5
+```
+
+```
+[q-test] generated 5 row(s) for 2 table(s): quote, trade
+timestamp                     sym    bid      ask      bidSize  askSize  source
+---------------------------------------------------------------------------------
+2026.08.23D18:38:47.867469155 EURUSD 307.2588 346.2846 230715.4 591941.2 EBS
+...
+  (quote: 5 row(s) total)
+...
+```
+
+For every table a schema file defines (an empty table — the same shape
+`.qt.scaffold.forFile` scaffolds tests against, just tables instead of
+functions), `.qt.datagen.forSchema` generates `-rows`
+rows (default 100) per column, from the SAME `.qt.gen.*` generators used
+for property-based testing — a `p` (timestamp) column draws from the last
+24h, an `s` (symbol) column draws from a small realistic-looking pool
+(more specific for a column literally named `sym`, `side`, or
+`source`/`venue`/`feed`), and an `f`/`e` (float) column draws price-range
+values for a `price`/`bid`/`ask`-named column or a wider size-range for a
+`size`/`qty`/`volume`/`notional`-named one. Any column that isn't one of
+these types is left null in every row rather than guessed at.
+
+Without `-save <dir>`, it previews up to 5 rows per table and discards the
+rest when the process exits. With `-save <dir>`, each table is written to
+`<dir>/<tableName>.qbin` — a single serialized file, loadable with a plain
+`get`, not a splayed directory (no enumeration/sym-file bookkeeping
+needed for a one-shot fixture). Called as a library function directly
+(`.qt.datagen.forSchema[path;n;overrides]`) rather than through the CLI,
+it also `set`s each table's own global variable with the generated rows,
+so e.g. `quote` is immediately usable in the same session right after the
+call - handy for seeding fixtures interactively before running a test
+suite that expects those tables to already have data.
+
+Override any column's generator with a third argument, a
+`tableName!(colName!generator)` dict for `forSchema` or a plain
+`colName!generator` dict for `.qt.datagen.forTable` (generate one table
+directly, without a schema file) — e.g.
+`` (enlist `sym)!enlist .qt.gen.sym `AAPL`MSFT `` replaces the default
+instrument pool with just those two.
 
 ## What's deliberately not here
 

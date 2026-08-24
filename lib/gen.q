@@ -33,6 +33,8 @@ gen.i.sym:{[pool;d] pool rand count pool};
 gen.i.str:{[maxLen;d] .Q.a rand each 1+til 1+rand maxLen};
 gen.i.listOf:{[g;maxLen;d] g[(::)] each til 1+rand maxLen};
 gen.i.oneOf:{[choices;d] choices rand count choices};
+gen.i.timestamp:{[from;to;d] from+rand to-from};
+gen.i.date:{[from;to;d] from+rand 1+`int$to-from};
 
 gen.int:{[lo;hi] gen.i.int[lo;hi;]};
 gen.float:{[lo;hi] gen.i.float[lo;hi;]};
@@ -41,6 +43,8 @@ gen.sym:{[pool] gen.i.sym[pool;]};
 gen.str:{[maxLen] gen.i.str[maxLen;]};
 gen.listOf:{[g;maxLen] gen.i.listOf[g;maxLen;]};
 gen.oneOf:{[choices] gen.i.oneOf[choices;]};
+gen.timestamp:{[from;to] gen.i.timestamp[from;to;]};
+gen.date:{[from;to] gen.i.date[from;to;]};
 
 / ---- shrinking ----------------------------------------------------------
 / shrink candidates for one value, nearer to a "simplest" version of it.
